@@ -268,6 +268,7 @@ Controls** (interface). Nenhum código da Microsoft é redistribuído.
 
 ## Licenças
 
+- **MobLens**: Apache License 2.0 (veja [LICENSE](LICENSE) e [NOTICE](NOTICE)).
 - `scrcpy-server`: © Genymobile e Romain Vimont, Apache License 2.0. A licença
   completa acompanha o programa em `LICENSE-scrcpy.txt`.
 - `adb` e bibliotecas: © The Android Open Source Project, Apache License 2.0.
