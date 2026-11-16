@@ -1,0 +1,13 @@
+# Saída de compilação
+/build/
+/dist/
+
+# Guia interno para agentes de IA (não publicar)
+AGENTS.md
+
+# Arquivos de editor / sistema
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

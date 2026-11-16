@@ -1,0 +1,5 @@
+// Manifesto: controles com visual moderno (Common Controls 6) e DPI
+1 24 "moblens.manifest"
+
+// Ícone do aplicativo (logo)
+1 ICON "../../icons/moblens.ico"
