@@ -42,11 +42,12 @@ add_executable(MobLens WIN32
     src/app/idle_frame.cpp
     src/app/log.cpp
     src/app/theme.cpp
+    src/app/uvc_detect.cpp
     src/app/moblens.rc
 )
 # o .rc referencia o manifesto pelo nome
 target_include_directories(MobLens PRIVATE src/app)
-target_link_libraries(MobLens PRIVATE mfplat mfuuid ole32 advapi32 shell32
+target_link_libraries(MobLens PRIVATE mf mfplat mfuuid ole32 advapi32 shell32
                       user32 gdi32 ws2_32 comctl32 dwmapi uxtheme)
 
 if(MINGW)

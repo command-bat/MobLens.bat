@@ -36,6 +36,10 @@ void LogInit();
 void Log(const wchar_t *fmt, ...);
 void LogRaw(const std::string &prefix, const std::string &text);
 
+// Nome da webcam de um celular Android no modo USB "Webcam" (Android 14+),
+// ou vazio se não houver (uvc_detect.cpp)
+std::wstring FindPhoneWebcam();
+
 // ---------------------------------------------------------------------------
 // Instalação da câmera virtual (installer.cpp)
 // ---------------------------------------------------------------------------

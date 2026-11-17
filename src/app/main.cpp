@@ -47,7 +47,10 @@ enum ControlId : UINT {
     IDC_LENS,
     ID_TRAY_OPEN = 300,
     ID_TRAY_EXIT,
+    ID_ADB_GUIDE,
 };
+
+const UINT_PTR kTimerPhoneWebcam = 1;  // espera os dispositivos assentarem
 
 const UINT32 kBitRates[] = {2, 4, 8, 16, 24};
 const wchar_t *const kBitRateNames[] = {
@@ -111,6 +114,11 @@ std::atomic<bool> g_previewPosted{false};
 std::vector<CameraInfo> g_cameras;   // somente na thread da interface
 std::vector<uint32_t> g_previewPixels;
 bool g_hasPreview = false;
+
+// Celular no modo USB "Webcam" (Android 14+), detectado pelo Windows
+std::wstring g_phoneWebcam;
+bool g_phoneWebcamNotified = false;
+RECT g_guideLink = {};  // link "como ativar a depuração USB" no cartão
 
 // Layout responsivo (unidades de 96 dpi), recalculado em Layout()
 struct PlacedControl {
@@ -313,6 +321,10 @@ StreamStatus CurrentStatus() {
 std::wstring StatusText(const StreamStatus &s) {
     switch (s.state) {
         case StreamState::NoDevice:
+            if (!g_phoneWebcam.empty()) {
+                return L"Celular no modo Webcam: escolha \"" + g_phoneWebcam
+                       + L"\" direto no aplicativo";
+            }
             return L"Conecte o celular via USB (depuração USB ativada)";
         case StreamState::Unauthorized:
             return L"Autorize a depuração USB na tela do celular";
@@ -370,6 +382,52 @@ void OnStatusChanged() {
         g_hasPreview = false;
     }
     InvalidateRect(g_preview, nullptr, FALSE);
+}
+
+// ----- Guia da depuração USB e modo Webcam ----------------------------------
+
+void ShowAdbGuide() {
+    MessageBoxW(
+        g_main,
+        L"A depuração USB é ativada uma única vez. Depois, basta conectar "
+        L"o cabo.\n\n"
+        L"1.  No celular, abra Configurações > Sobre o telefone > "
+        L"Informações do software.\n"
+        L"2.  Toque 7 vezes em \"Número de compilação\" até aparecer "
+        L"\"Modo de desenvolvedor ativado\".\n"
+        L"3.  Volte às Configurações e abra \"Opções do desenvolvedor\" "
+        L"(no fim da lista).\n"
+        L"4.  Ligue \"Depuração USB\".\n"
+        L"5.  Conecte o cabo USB ao PC.\n"
+        L"6.  No celular, marque \"Sempre permitir neste computador\" e "
+        L"toque em Permitir.\n\n"
+        L"Dicas:\n"
+        L"•  Os nomes dos menus mudam um pouco entre fabricantes.\n"
+        L"•  Samsung: instale o \"Samsung USB Driver\" no PC.\n"
+        L"•  Use um cabo de dados (alguns cabos só carregam).\n\n"
+        L"Sem depuração USB: alguns celulares com Android 14 ou mais novo "
+        L"têm o modo \"Webcam\" na notificação \"Usar USB para\". Nesse modo "
+        L"o Windows usa o celular direto como webcam (sem o MobLens, sem "
+        L"zoom, lanterna ou escolha de lente).",
+        L"Como ativar a depuração USB", MB_OK | MB_ICONINFORMATION);
+}
+
+// Procura um celular no modo Webcam e atualiza o status
+void CheckPhoneWebcam() {
+    std::wstring name = FindPhoneWebcam();
+    if (name == g_phoneWebcam) {
+        return;
+    }
+    g_phoneWebcam = name;
+    if (name.empty()) {
+        g_phoneWebcamNotified = false;
+    } else if (!g_phoneWebcamNotified) {
+        g_phoneWebcamNotified = true;
+        std::wstring text = L"Celular conectado no modo Webcam. Escolha \""
+                            + name + L"\" direto no aplicativo.";
+        ShowBalloon(text.c_str());
+    }
+    OnStatusChanged();
 }
 
 // ----- Prévia ---------------------------------------------------------------
@@ -954,6 +1012,24 @@ void PaintMain(HDC dc) {
         ty += 24;
     }
 
+    // Link para o guia da depuração USB (clique em WM_LBUTTONUP)
+    g_guideLink = {};
+    if (ty + 20 <= help.y + help.h - 4) {
+        const wchar_t *link =
+            L"Primeira vez? Veja como ativar a depuração USB (uma vez só)";
+        RECT lr = ScaledRect(help.x + kPad, ty, help.w - 2 * kPad, 20);
+        SetTextColor(dc, g_theme.accent);
+        RECT measure = lr;
+        DrawTextW(dc, link, -1, &measure,
+                  DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
+        if (measure.right > lr.right) {
+            measure.right = lr.right;
+        }
+        DrawTextW(dc, link, -1, &lr,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        g_guideLink = {lr.left, lr.top, measure.right, lr.bottom};
+    }
+
     SelectObject(dc, oldFont);
 }
 
@@ -1004,6 +1080,8 @@ void ShowOptionsMenu() {
     HMENU menu = CreatePopupMenu();
     AppendTrayOptions(menu);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, ID_ADB_GUIDE,
+                L"Como ativar a depuração USB...");
     AppendMenuW(menu, MF_STRING, IDC_UNINSTALL,
                 L"Desinstalar webcam virtual...");
     RECT rc;
@@ -1308,6 +1386,8 @@ void ShowTrayMenu() {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendTrayOptions(menu);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, ID_ADB_GUIDE,
+                L"Como ativar a depuração USB...");
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"Sair");
     SetMenuDefaultItem(menu, ID_TRAY_OPEN, FALSE);
 
@@ -1385,6 +1465,9 @@ void OnCommand(UINT id, UINT code) {
             break;
         case ID_TRAY_EXIT:
             DestroyWindow(g_main);
+            break;
+        case ID_ADB_GUIDE:
+            ShowAdbGuide();
             break;
         default:
             HandleTrayOption(id);
@@ -1486,6 +1569,37 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == IDC_MENU) {
                 DrawMenuButton((const DRAWITEMSTRUCT *) lp);
                 return TRUE;
+            }
+            break;
+        case WM_DEVICECHANGE:
+            // Um dispositivo entrou ou saiu: procura o modo Webcam depois
+            // que a enumeração terminar
+            SetTimer(hwnd, kTimerPhoneWebcam, 1500, nullptr);
+            break;
+        case WM_TIMER:
+            if (wp == kTimerPhoneWebcam) {
+                KillTimer(hwnd, kTimerPhoneWebcam);
+                CheckPhoneWebcam();
+                return 0;
+            }
+            break;
+        case WM_LBUTTONUP: {
+            POINT pt = {(short) LOWORD(lp), (short) HIWORD(lp)};
+            if (PtInRect(&g_guideLink, pt)) {
+                ShowAdbGuide();
+                return 0;
+            }
+            break;
+        }
+        case WM_SETCURSOR:
+            if (LOWORD(lp) == HTCLIENT) {
+                POINT pt;
+                GetCursorPos(&pt);
+                ScreenToClient(hwnd, &pt);
+                if (PtInRect(&g_guideLink, pt)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
             }
             break;
         case WM_SETTINGCHANGE:
@@ -1682,6 +1796,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
     g_nid.uCallbackMessage = WM_TRAY;
     UpdateTray(true);
     OnStatusChanged();
+    CheckPhoneWebcam();
 
     if (startHidden) {
         g_hiddenHintShown = true;

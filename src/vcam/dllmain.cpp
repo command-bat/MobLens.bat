@@ -7,14 +7,12 @@ HMODULE g_module = nullptr;
 volatile LONG g_objectCount = 0;
 volatile LONG g_lockCount = 0;
 
+// Um único formato anunciado: o Frame Server só compartilha a câmera entre
+// vários aplicativos quando todos usam o mesmo formato. Com várias opções,
+// cada app escolhia uma resolução diferente e o segundo recebia "câmera em
+// uso". Os aplicativos redimensionam o 1080p conforme precisarem.
 const VideoFormat kFormats[] = {
-    {1920, 1080, 30},  // padrão
-    {1280, 720, 30},
-    {3840, 2160, 30},
-    {2560, 1440, 30},
-    {960, 540, 30},
-    {640, 480, 30},
-    {640, 360, 30},
+    {1920, 1080, 30},
 };
 const DWORD kFormatCount = sizeof(kFormats) / sizeof(kFormats[0]);
 
