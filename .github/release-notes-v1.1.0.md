@@ -5,6 +5,9 @@
 - 📐 **Janela redimensionável**: a interface se reorganiza conforme o tamanho (cartões em colunas, depois embaixo da prévia) e, bem pequena, as opções viram um menu ☰.
 - 🔭 **Escolha da lente**: escolha o tipo (traseira, frontal) e, ao lado, a lente, com nomes como **Principal**, **Ultra-angular · 0,4x** e **Teleobjetiva · 3x**, calculados pela óptica do celular.
 - 🖼️ **Vídeo de espera com a logo**: com o app aberto e o celular desconectado, a webcam mostra a logo do MobLens e o que falta fazer ("Celular não conectado", "Autorize este computador no celular"...).
+- 👥 **Vários aplicativos ao mesmo tempo**: a webcam MobLens agora usa um formato único (1080p, 30 fps), e o Windows a compartilha entre Meet, Teams, Zoom, Discord etc. abertos juntos. (O app **Câmera** do Windows ainda pede uso exclusivo, como faz com qualquer webcam.)
+- 📖 **Guia da depuração USB**: passo a passo para ativar a depuração uma única vez, no cartão de Status, no menu ☰ e no menu da bandeja.
+- 📱 **Detecção do modo Webcam (Android 14+)**: se o celular estiver conectado no modo USB "Webcam", o MobLens avisa que dá para usá-lo direto no aplicativo, sem depuração.
 
 ### Correções
 - A webcam ficava sem vídeo após a primeira instalação até o MobLens ser fechado (o app aberto pelo instalador rodava como administrador).
