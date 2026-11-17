@@ -38,10 +38,12 @@ moblens_producer_is_open(const struct moblens_producer *p) {
 /*
  * Tenta abrir a memória compartilhada (no máximo uma tentativa por segundo).
  *
- * Normalmente ela é criada pela câmera virtual (dentro do serviço Frame
- * Server) quando algum aplicativo abre a webcam. Se o produtor tiver
- * privilégio para criar objetos globais (ex.: executado como administrador),
- * ele mesmo a cria.
+ * Ela é sempre criada pela câmera virtual (no Windows 11, dentro do serviço
+ * Frame Server; nos anteriores, pela webcam DirectShow) quando algum
+ * aplicativo abre a webcam. O produtor NUNCA a cria: se o MobLens rodasse
+ * como administrador (ex.: aberto pelo instalador) e criasse o objeto
+ * global, o Frame Server (conta de serviço restrita) não conseguiria
+ * abri-lo e a webcam ficaria sem vídeo até o MobLens ser fechado.
  */
 static inline bool
 moblens_producer_try_open(struct moblens_producer *p) {
@@ -58,20 +60,8 @@ moblens_producer_try_open(struct moblens_producer *p) {
     const DWORD access = FILE_MAP_READ | FILE_MAP_WRITE;
     HANDLE h = OpenFileMappingW(access, FALSE, MOBLENS_SHM_NAME_GLOBAL);
     if (!h) {
-        PSECURITY_DESCRIPTOR psd = NULL;
-        SECURITY_ATTRIBUTES sa;
-        ZeroMemory(&sa, sizeof(sa));
-        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                MOBLENS_SHM_SDDL, SDDL_REVISION_1, &psd, NULL)) {
-            sa.nLength = sizeof(sa);
-            sa.lpSecurityDescriptor = psd;
-        }
-        h = CreateFileMappingW(INVALID_HANDLE_VALUE, psd ? &sa : NULL,
-                               PAGE_READWRITE, 0, MOBLENS_SHM_TOTAL_SIZE,
-                               MOBLENS_SHM_NAME_GLOBAL);
-        if (psd) {
-            LocalFree(psd);
-        }
+        /* Windows 10/8/7: memória criada pela webcam DirectShow */
+        h = OpenFileMappingW(access, FALSE, MOBLENS_SHM_NAME_LOCAL);
     }
     if (!h) {
         return false;

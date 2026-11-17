@@ -11,6 +11,15 @@ namespace {
 
 const wchar_t kInprocKey[] =
     L"SOFTWARE\\Classes\\CLSID\\" MOBLENS_CLSID_STR L"\\InprocServer32";
+const wchar_t kDShowInprocKey[] =
+    L"SOFTWARE\\Classes\\CLSID\\" MOBLENS_DSHOW_CLSID_STR L"\\InprocServer32";
+
+// Windows 11: webcam nativa (MFCreateVirtualCamera). Windows 10/8/7: webcam
+// DirectShow (moblens_dshow.dll), vista por Zoom, Discord, navegadores, OBS...
+bool HasNativeVirtualCamera() {
+    HMODULE m = LoadLibraryW(L"mfsensorgroup.dll");
+    return m && GetProcAddress(m, "MFCreateVirtualCamera");
+}
 
 std::wstring InstallDir() {
     wchar_t *pf = nullptr;
@@ -115,9 +124,11 @@ bool CopyDll(const std::wstring &src, const std::wstring &dst) {
 } // namespace
 
 CameraInstallState GetCameraInstallState() {
+    const bool native = HasNativeVirtualCamera();
     HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kInprocKey, 0, KEY_READ, &key)
-            != ERROR_SUCCESS) {
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      native ? kInprocKey : kDShowInprocKey, 0, KEY_READ,
+                      &key) != ERROR_SUCCESS) {
         return CameraInstallState::Missing;
     }
     wchar_t path[MAX_PATH] = {};
@@ -129,12 +140,68 @@ CameraInstallState GetCameraInstallState() {
             || GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
         return CameraInstallState::Missing;
     }
-    std::wstring bundled = AppDir() + L"\\" MOBLENS_DLL_NAME;
+    std::wstring bundled = AppDir() + L"\\"
+                         + (native ? MOBLENS_DLL_NAME : MOBLENS_DSHOW_DLL_NAME);
     return SameFile(path, bundled) ? CameraInstallState::Ok
                                    : CameraInstallState::Outdated;
 }
 
+namespace {
+
+// Windows 10/8/7: registra a webcam DirectShow
+bool InstallDirectShowCamera(std::wstring &error) {
+    std::wstring src = AppDir() + L"\\" MOBLENS_DSHOW_DLL_NAME;
+    if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        error = L"Arquivo não encontrado: " + src;
+        return false;
+    }
+    std::wstring dir = InstallDir();
+    CreateDirectoryW(dir.c_str(), nullptr);
+    std::wstring dst = dir + L"\\" MOBLENS_DSHOW_DLL_NAME;
+    const bool sameFile = !lstrcmpiW(src.c_str(), dst.c_str());
+    if (!sameFile && !CopyDll(src, dst)) {
+        error = L"Falha ao copiar a DLL para " + dst;
+        return false;
+    }
+    HRESULT hr = CallDllExport(dst, "DllRegisterServer");
+    Log(L"instalação (DirectShow): DllRegisterServer 0x%08lx",
+        (unsigned long) hr);
+    if (FAILED(hr)) {
+        error = HrText(L"Falha ao registrar a webcam DirectShow", hr);
+        return false;
+    }
+    return true;
+}
+
+// Remove a webcam DirectShow (desinstalação ou Windows atualizado para o 11)
+void UninstallDirectShowCamera() {
+    std::wstring dir = InstallDir();
+    std::wstring dll = dir + L"\\" MOBLENS_DSHOW_DLL_NAME;
+    if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return;
+    }
+    CallDllExport(dll, "DllUnregisterServer");
+    const bool bundled = !lstrcmpiW(AppDir().c_str(), dir.c_str());
+    if (!bundled && !DeleteFileW(dll.c_str())) {
+        // Carregada por algum aplicativo: renomeia e apaga no reinício
+        std::wstring old = dll + L"." + std::to_wstring(GetTickCount64())
+                         + L".old";
+        if (MoveFileExW(dll.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            MoveFileExW(old.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+        }
+    }
+}
+
+} // namespace
+
 bool InstallCamera(std::wstring &error) {
+    if (!HasNativeVirtualCamera()) {
+        Log(L"instalação: Windows sem MFCreateVirtualCamera, usando "
+            L"DirectShow");
+        return InstallDirectShowCamera(error);
+    }
+    UninstallDirectShowCamera();  // instalada antes de atualizar o Windows
+
     std::wstring src = AppDir() + L"\\" MOBLENS_DLL_NAME;
     if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES) {
         error = L"Arquivo não encontrado: " + src;
@@ -182,12 +249,16 @@ bool InstallCamera(std::wstring &error) {
 }
 
 bool UninstallCamera(std::wstring &error) {
+    UninstallDirectShowCamera();
     IMcamVirtualCamera *vc = nullptr;
-    HRESULT hr = CreateVirtualCamera(&vc);
-    if (SUCCEEDED(hr)) {
-        hr = vc->Remove();
-        vc->Shutdown();
-        vc->Release();
+    HRESULT hr = S_OK;
+    if (HasNativeVirtualCamera()) {
+        hr = CreateVirtualCamera(&vc);
+        if (SUCCEEDED(hr)) {
+            hr = vc->Remove();
+            vc->Shutdown();
+            vc->Release();
+        }
     }
     if (FAILED(hr)) {
         error = HrText(L"Falha ao remover a câmera virtual", hr);
@@ -195,12 +266,22 @@ bool UninstallCamera(std::wstring &error) {
 
     std::wstring dir = InstallDir();
     std::wstring dll = dir + L"\\" MOBLENS_DLL_NAME;
+    // Instalado pelo instalador: a DLL é parte do programa, não apaga
+    const bool bundled = !lstrcmpiW(AppDir().c_str(), dir.c_str());
     if (GetFileAttributesW(dll.c_str()) != INVALID_FILE_ATTRIBUTES) {
         CallDllExport(dll, "DllUnregisterServer");
-        if (!DeleteFileW(dll.c_str())) {
-            MoveFileExW(dll.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+        if (!bundled && !DeleteFileW(dll.c_str())) {
+            // Nunca agenda a exclusão do nome real: uma reinstalação antes
+            // do reinício teria a DLL nova apagada no boot. Renomeia antes.
+            std::wstring old = dll + L"." + std::to_wstring(GetTickCount64())
+                             + L".old";
+            if (MoveFileExW(dll.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+                MoveFileExW(old.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+            }
         }
     }
-    RemoveDirectoryW(dir.c_str());
+    if (!bundled) {
+        RemoveDirectoryW(dir.c_str());
+    }
     return SUCCEEDED(hr);
 }

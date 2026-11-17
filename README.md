@@ -83,7 +83,7 @@ webcam do sistema, com baixa latência e transmissão estável pelo cabo USB.
 
 | Item | Requisito |
 | :--- | :--- |
-| Sistema operacional | Windows 11, 64 bits (a API de câmera virtual não existe no Windows 10) |
+| Sistema operacional | Windows 11, 10, 8.1 ou 7 (64 bits). No Windows 11 a webcam é nativa (todos os apps); nos anteriores é uma webcam DirectShow (Zoom, Discord, Chrome/Edge, Teams, OBS...; o app Câmera do Windows não a vê) |
 | Celular | Android 12 ou superior (captura de câmera do scrcpy-server) |
 | Conexão | Cabo USB com **Depuração USB** ativada no celular |
 | Driver | Driver USB do fabricante do celular (por exemplo, [Samsung Android USB Driver](https://developer.samsung.com/android-usb-driver)) |

@@ -27,7 +27,7 @@ cmake -S "$ROOT" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build "$BUILD"
 
 mkdir -p "$OUT"
-cp "$BUILD/MobLens.exe" "$BUILD/moblens_vcam.dll" "$OUT/"
+cp "$BUILD/MobLens.exe" "$BUILD/moblens_vcam.dll" "$BUILD/moblens_dshow.dll" "$OUT/"
 # -u: não recopia (o adb.exe pode estar em execução)
 cp -u "$ROOT"/third_party/scrcpy/{adb.exe,AdbWinApi.dll,AdbWinUsbApi.dll,scrcpy-server} "$OUT/"
 cp -u "$ROOT/third_party/scrcpy/LICENSE.txt" "$OUT/LICENSE-scrcpy.txt"

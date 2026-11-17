@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 project(MobLens CXX RC)
 
 if(NOT WIN32)
-    message(FATAL_ERROR "MobLens é exclusivo para Windows 11")
+    message(FATAL_ERROR "MobLens é exclusivo para Windows")
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -23,6 +23,14 @@ add_library(moblens_vcam SHARED
 target_link_libraries(moblens_vcam PRIVATE mfplat mfuuid ole32 advapi32)
 set_target_properties(moblens_vcam PROPERTIES PREFIX "")
 
+# --- Webcam DirectShow (Windows 10/8/7): carregada pelos aplicativos ------
+add_library(moblens_dshow SHARED
+    src/dshow/dshow_filter.cpp
+    src/dshow/moblens_dshow.def
+)
+target_link_libraries(moblens_dshow PRIVATE strmiids uuid ole32 advapi32)
+set_target_properties(moblens_dshow PROPERTIES PREFIX "")
+
 # --- Aplicativo (janela + bandeja) ---------------------------------------------------
 add_executable(MobLens WIN32
     src/app/main.cpp
@@ -31,6 +39,7 @@ add_executable(MobLens WIN32
     src/app/adb.cpp
     src/app/h264_decoder.cpp
     src/app/nv12.cpp
+    src/app/idle_frame.cpp
     src/app/log.cpp
     src/app/theme.cpp
     src/app/moblens.rc
@@ -42,12 +51,12 @@ target_link_libraries(MobLens PRIVATE mfplat mfuuid ole32 advapi32 shell32
 
 if(MINGW)
     # Sem dependência das DLLs do MSYS2 (libstdc++, libgcc, winpthread)
-    foreach(t moblens_vcam MobLens)
+    foreach(t moblens_vcam moblens_dshow MobLens)
         target_link_options(${t} PRIVATE -static -static-libgcc
                             -static-libstdc++)
     endforeach()
     target_link_options(MobLens PRIVATE -municode)
 elseif(MSVC)
-    set_property(TARGET moblens_vcam MobLens PROPERTY
+    set_property(TARGET moblens_vcam moblens_dshow MobLens PROPERTY
                  MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()

@@ -7,7 +7,7 @@ Unicode true
 !define APP "MobLens"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\MobLens"
 !ifndef VERSION
-  !define VERSION "1.0.0"
+  !define VERSION "1.1.0"
 !endif
 
 Name "${APP}"
@@ -20,7 +20,9 @@ BrandingText "${APP} ${VERSION}"
 !define MUI_ICON "..\icons\moblens.ico"
 !define MUI_UNICON "..\icons\moblens.ico"
 !define MUI_ABORTWARNING
-!define MUI_FINISHPAGE_RUN "$INSTDIR\MobLens.exe"
+; Abre o MobLens como usuário comum (o instalador roda como administrador)
+!define MUI_FINISHPAGE_RUN
+!define MUI_FINISHPAGE_RUN_FUNCTION LaunchAsUser
 !define MUI_FINISHPAGE_RUN_TEXT "Abrir o MobLens"
 
 !insertmacro MUI_PAGE_WELCOME
@@ -31,9 +33,14 @@ BrandingText "${APP} ${VERSION}"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "PortugueseBR"
 
+Function LaunchAsUser
+  ; O Explorer inicia o programa com o token do usuário, sem elevação
+  Exec '"$WINDIR\explorer.exe" "$INSTDIR\MobLens.exe"'
+FunctionEnd
+
 Function .onInit
   ${IfNot} ${RunningX64}
-    MessageBox MB_ICONSTOP "O MobLens requer Windows 11 de 64 bits."
+    MessageBox MB_ICONSTOP "O MobLens requer Windows de 64 bits (7, 8, 10 ou 11)."
     Abort
   ${EndIf}
   SetRegView 64
@@ -58,8 +65,16 @@ Section "MobLens"
     Rename "$INSTDIR\moblens_vcam.dll" "$INSTDIR\moblens_vcam.dll.old"
     Delete /REBOOTOK "$INSTDIR\moblens_vcam.dll.old"
   dll_free:
+  ; Windows 10/8/7: webcam DirectShow, carregada pelos aplicativos abertos
+  Delete "$INSTDIR\moblens_dshow.dll.old"
+  Delete "$INSTDIR\moblens_dshow.dll"
+  IfFileExists "$INSTDIR\moblens_dshow.dll" 0 dshow_free
+    Rename "$INSTDIR\moblens_dshow.dll" "$INSTDIR\moblens_dshow.dll.old"
+    Delete /REBOOTOK "$INSTDIR\moblens_dshow.dll.old"
+  dshow_free:
   File "..\dist\MobLens\MobLens.exe"
   File "..\dist\MobLens\moblens_vcam.dll"
+  File "..\dist\MobLens\moblens_dshow.dll"
   File "..\dist\MobLens\adb.exe"
   File "..\dist\MobLens\AdbWinApi.dll"
   File "..\dist\MobLens\AdbWinUsbApi.dll"
@@ -107,8 +122,20 @@ Section "Uninstall"
   Delete "$DESKTOP\MobLens.lnk"
 
   Delete "$INSTDIR\MobLens.exe"
-  Delete /REBOOTOK "$INSTDIR\moblens_vcam.dll"
+  ; Nunca agenda a exclusão do nome real: se reinstalar antes de reiniciar,
+  ; o Windows apagaria a DLL nova no boot. Renomeia antes de agendar.
+  Delete "$INSTDIR\moblens_vcam.dll"
+  IfFileExists "$INSTDIR\moblens_vcam.dll" 0 +3
+    Delete "$INSTDIR\moblens_vcam.dll.un.old"
+    Rename "$INSTDIR\moblens_vcam.dll" "$INSTDIR\moblens_vcam.dll.un.old"
+  Delete /REBOOTOK "$INSTDIR\moblens_vcam.dll.un.old"
   Delete /REBOOTOK "$INSTDIR\moblens_vcam.dll.old"
+  Delete "$INSTDIR\moblens_dshow.dll"
+  IfFileExists "$INSTDIR\moblens_dshow.dll" 0 +3
+    Delete "$INSTDIR\moblens_dshow.dll.un.old"
+    Rename "$INSTDIR\moblens_dshow.dll" "$INSTDIR\moblens_dshow.dll.un.old"
+  Delete /REBOOTOK "$INSTDIR\moblens_dshow.dll.un.old"
+  Delete /REBOOTOK "$INSTDIR\moblens_dshow.dll.old"
   Delete "$INSTDIR\adb.exe"
   Delete "$INSTDIR\AdbWinApi.dll"
   Delete "$INSTDIR\AdbWinUsbApi.dll"

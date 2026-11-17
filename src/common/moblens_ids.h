@@ -13,4 +13,9 @@
 
 #define MOBLENS_FPS 30u
 
+/* Windows 10/8/7 (sem MFCreateVirtualCamera): webcam DirectShow, carregada
+ * dentro de cada aplicativo que usa a câmera */
+#define MOBLENS_DSHOW_CLSID_STR L"{B1F4C7D2-6A3E-4E85-9C1B-7D2E5F8A3C64}"
+#define MOBLENS_DSHOW_DLL_NAME L"moblens_dshow.dll"
+
 #endif

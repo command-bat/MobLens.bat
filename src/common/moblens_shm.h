@@ -23,6 +23,9 @@
 #include <stdint.h>
 
 #define MOBLENS_SHM_NAME_GLOBAL L"Global\\MobLensFrameBuffer"
+/* Windows 10/8/7: a webcam DirectShow roda nos aplicativos do usuário, que
+ * não podem criar objetos globais; usa-se o espaço de nomes da sessão. */
+#define MOBLENS_SHM_NAME_LOCAL L"Local\\MobLensFrameBuffer"
 
 #define MOBLENS_SHM_MAGIC   0x4D41434Du /* "MCAM" */
 #define MOBLENS_SHM_VERSION 1u

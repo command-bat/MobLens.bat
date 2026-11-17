@@ -8,6 +8,8 @@
 #include "app.h"
 #include "theme.h"
 
+#include <algorithm>
+#include <cmath>
 #include <commctrl.h>
 #include <mfapi.h>
 #include <shellapi.h>
@@ -41,6 +43,8 @@ enum ControlId : UINT {
     IDC_CLOSE_ACTION,
     IDC_UNINSTALL,
     IDC_LABEL,
+    IDC_MENU,
+    IDC_LENS,
     ID_TRAY_OPEN = 300,
     ID_TRAY_EXIT,
 };
@@ -63,12 +67,17 @@ const int kRightX = kMargin + PREVIEW_WIDTH + kMargin;
 const int kRightW = 300;
 const int kClientW = kRightX + kRightW + kMargin;
 const int kClientH = 668;
+const int kMinClientW = 380;  // tamanho mínimo da área cliente
+const int kMinClientH = 320;
+const int kStatusH = 208;     // altura mínima do cartão de status
+const int kMinPreviewH = 150;
+const int kMenuBtnW = 40;
 
 struct CardDef {
     int x, y, w, h;
     const wchar_t *title;
 };
-const CardDef kCards[] = {
+CardDef kCards[] = {  // posições recalculadas em Layout()
     {kRightX, 16, kRightW, 214, L"Câmera"},
     {kRightX, 242, kRightW, 222, L"Imagem"},
     {kRightX, 476, kRightW, 176, L"Aplicativo"},
@@ -102,6 +111,19 @@ std::atomic<bool> g_previewPosted{false};
 std::vector<CameraInfo> g_cameras;   // somente na thread da interface
 std::vector<uint32_t> g_previewPixels;
 bool g_hasPreview = false;
+
+// Layout responsivo (unidades de 96 dpi), recalculado em Layout()
+struct PlacedControl {
+    HWND hwnd;
+    int card;    // cartão a que pertence (0..2)
+    int dx, dy;  // posição relativa ao canto do cartão
+};
+std::vector<PlacedControl> g_placed;
+int g_addingCard = 0;          // cartão dos controles criados em seguida
+bool g_compact = false;        // opções escondidas, acessíveis pelo menu
+bool g_statusVisible = true;
+int g_headerRight = kMargin + PREVIEW_WIDTH;
+HWND g_menuButton;
 
 int S(int v) {
     return (int) (v * g_scale + 0.5);
@@ -401,11 +423,11 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 // ----- Controles de configuração -------------------------------------------
 
 const CameraInfo *SelectedCamera() {
-    int sel = (int) SendMessageW(Ctl(IDC_CAMERA), CB_GETCURSEL, 0, 0);
+    int sel = (int) SendMessageW(Ctl(IDC_LENS), CB_GETCURSEL, 0, 0);
     if (sel < 0 || g_cameras.empty()) {
         return nullptr;
     }
-    LRESULT idx = SendMessageW(Ctl(IDC_CAMERA), CB_GETITEMDATA, sel, 0);
+    LRESULT idx = SendMessageW(Ctl(IDC_LENS), CB_GETITEMDATA, sel, 0);
     return idx >= 0 && (size_t) idx < g_cameras.size() ? &g_cameras[idx]
                                                        : nullptr;
 }
@@ -492,50 +514,158 @@ void FillResolutionAndFps() {
     FillFps();
 }
 
-// Nome amigável: "Traseira 1", "Frontal 2"...
-std::wstring CameraLabel(size_t index) {
+// Tipos de câmera presentes no aparelho, na ordem: traseira, frontal, ...
+std::vector<std::wstring> g_facings;
+
+std::wstring Capitalized(std::wstring text) {
+    if (!text.empty()) {
+        text[0] = towupper(text[0]);
+    }
+    return text;
+}
+
+// Distância focal equivalente a 35 mm (0 = desconhecida)
+float EquivalentFocal(const CameraInfo &cam) {
+    return cam.focalLength > 0 && cam.sensorDiagonal > 0
+               ? cam.focalLength * 43.27f / cam.sensorDiagonal
+               : 0.0f;
+}
+
+// Nome da lente pela óptica: "Principal", "Ultra-angular · 0,5x",
+// "Teleobjetiva · 3x"... Sem dados ópticos: "Lente 1", "Lente 2"...
+std::wstring LensLabel(size_t index) {
     const CameraInfo &cam = g_cameras[index];
+    // Principal = maior sensor do mesmo tipo (empate: a primeira)
+    const CameraInfo *main = nullptr;
     int number = 1;
-    for (size_t i = 0; i < index; ++i) {
-        if (g_cameras[i].facing == cam.facing) {
+    for (size_t i = 0; i < g_cameras.size(); ++i) {
+        const CameraInfo &c = g_cameras[i];
+        if (c.facing != cam.facing) {
+            continue;
+        }
+        if (i < index) {
             ++number;
         }
+        if (!main || c.sensorDiagonal > main->sensorDiagonal) {
+            main = &c;
+        }
     }
-    std::wstring facing = FacingName(cam.facing);
-    if (!facing.empty()) {
-        facing[0] = towupper(facing[0]);
+    const float eq = EquivalentFocal(cam);
+    const float mainEq = main ? EquivalentFocal(*main) : 0.0f;
+    std::wstring label;
+    if (eq <= 0 || mainEq <= 0) {
+        label = L"Lente " + std::to_wstring(number);
+    } else {
+        const float ratio = eq / mainEq;
+        wchar_t zoom[16];
+        const int tenths = (int) (ratio * 10 + 0.5f);
+        if (tenths % 10 == 0) {
+            swprintf(zoom, 16, L"%dx", tenths / 10);
+        } else {
+            swprintf(zoom, 16, L"%d,%dx", tenths / 10, tenths % 10);
+        }
+        if (fabsf(ratio - 1.0f) < 0.05f) {
+            label = L"Principal";
+        } else if (ratio < 0.8f) {
+            label = std::wstring(L"Ultra-angular · ") + zoom;
+        } else if (ratio > 1.6f) {
+            label = std::wstring(L"Teleobjetiva · ") + zoom;
+        } else {
+            label = std::wstring(ratio < 1.0f ? L"Grande angular · "
+                                              : L"Aproximada · ") + zoom;
+        }
     }
-    std::wstring text = facing + L" " + std::to_wstring(number);
-    return text;
+    // Lentes com o mesmo nome (IDs lógicos do mesmo sensor): numera
+    int same = 1;
+    for (size_t i = 0; i < index; ++i) {
+        if (g_cameras[i].facing == cam.facing && LensLabel(i) == label) {
+            ++same;
+        }
+    }
+    if (same > 1) {
+        label += L" (" + std::to_wstring(same) + L")";
+    }
+    return label;
+}
+
+// Preenche as lentes do tipo escolhido no combo "Câmera"
+void FillLenses() {
+    HWND combo = Ctl(IDC_LENS);
+    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    int type = (int) SendMessageW(Ctl(IDC_CAMERA), CB_GETCURSEL, 0, 0);
+    if (type < 0 || (size_t) type >= g_facings.size()) {
+        SendMessageW(combo, CB_ADDSTRING, 0, (LPARAM) L"Padrão");
+        SendMessageW(combo, CB_SETITEMDATA, 0, (LPARAM) -1);
+        SendMessageW(combo, CB_SETCURSEL, 0, 0);
+        EnableWindow(combo, FALSE);
+        return;
+    }
+    int selected = -1;
+    int count = 0;
+    for (size_t i = 0; i < g_cameras.size(); ++i) {
+        if (g_cameras[i].facing != g_facings[type]) {
+            continue;
+        }
+        int item = (int) SendMessageW(combo, CB_ADDSTRING, 0,
+                                      (LPARAM) LensLabel(i).c_str());
+        SendMessageW(combo, CB_SETITEMDATA, item, (LPARAM) i);
+        if (g_cameras[i].id == g_settings.cameraId) {
+            selected = item;
+        }
+        ++count;
+    }
+    if (selected < 0) {
+        // Prefere a principal
+        selected = 0;
+        for (int i = 0; i < count; ++i) {
+            LRESULT idx = SendMessageW(combo, CB_GETITEMDATA, i, 0);
+            if (LensLabel((size_t) idx) == L"Principal") {
+                selected = i;
+                break;
+            }
+        }
+    }
+    SendMessageW(combo, CB_SETCURSEL, selected, 0);
+    EnableWindow(combo, count > 1);
 }
 
 void FillCameras() {
     HWND combo = Ctl(IDC_CAMERA);
     SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    g_facings.clear();
     if (g_cameras.empty()) {
         SendMessageW(combo, CB_ADDSTRING, 0, (LPARAM) L"Traseira (padrão)");
-        SendMessageW(combo, CB_SETITEMDATA, 0, (LPARAM) -1);
         SendMessageW(combo, CB_SETCURSEL, 0, 0);
+        FillLenses();
         return;
     }
-    int selected = -1;
-    int firstBack = -1;
-    for (size_t i = 0; i < g_cameras.size(); ++i) {
-        const CameraInfo &cam = g_cameras[i];
-        SendMessageW(combo, CB_ADDSTRING, 0,
-                     (LPARAM) CameraLabel(i).c_str());
-        SendMessageW(combo, CB_SETITEMDATA, i, (LPARAM) i);
-        if (cam.id == g_settings.cameraId) {
-            selected = (int) i;
-        }
-        if (firstBack < 0 && cam.facing == L"back") {
-            firstBack = (int) i;
+    const wchar_t *order[] = {L"back", L"front", L"external"};
+    for (const wchar_t *f : order) {
+        for (const CameraInfo &cam : g_cameras) {
+            if (cam.facing == f) {
+                g_facings.push_back(f);
+                break;
+            }
         }
     }
-    if (selected < 0) {
-        selected = firstBack >= 0 ? firstBack : 0;
+    for (const CameraInfo &cam : g_cameras) {  // tipos desconhecidos
+        if (std::find(g_facings.begin(), g_facings.end(), cam.facing)
+                == g_facings.end()) {
+            g_facings.push_back(cam.facing);
+        }
+    }
+    int selected = 0;
+    for (size_t i = 0; i < g_facings.size(); ++i) {
+        SendMessageW(combo, CB_ADDSTRING, 0,
+                     (LPARAM) Capitalized(FacingName(g_facings[i])).c_str());
+        for (const CameraInfo &cam : g_cameras) {
+            if (cam.id == g_settings.cameraId && cam.facing == g_facings[i]) {
+                selected = (int) i;
+            }
+        }
     }
     SendMessageW(combo, CB_SETCURSEL, selected, 0);
+    FillLenses();
 }
 
 void UpdateZoomLabel() {
@@ -588,6 +718,8 @@ HWND AddControl(const wchar_t *cls, const wchar_t *text, DWORD style, int x,
                                 (HMENU) (UINT_PTR) id, g_instance, nullptr);
     SendMessageW(hwnd, WM_SETFONT, (WPARAM) (font ? font : g_font), TRUE);
     ThemeApplyToControl(hwnd);
+    const CardDef &card = kCards[g_addingCard];
+    g_placed.push_back({hwnd, g_addingCard, x - card.x, y - card.y});
     return hwnd;
 }
 
@@ -611,10 +743,12 @@ void CreateControls() {
 
     // Cartão "Câmera"
     const CardDef &c1 = kCards[0];
+    g_addingCard = 0;
     const int x = c1.x + kPad;
     const int w = c1.w - 2 * kPad;
     const int half = (w - 12) / 2;
-    AddCombo(L"Câmera", x, c1.y + 44, w, IDC_CAMERA);
+    AddCombo(L"Câmera", x, c1.y + 44, half, IDC_CAMERA);
+    AddCombo(L"Lente", x + half + 12, c1.y + 44, half, IDC_LENS);
     AddCombo(L"Resolução", x, c1.y + 96, half, IDC_RESOLUTION);
     AddCombo(L"Taxa de quadros", x + half + 12, c1.y + 96, half, IDC_FPS);
     HWND quality = AddCombo(L"Qualidade do vídeo", x, c1.y + 148, w,
@@ -622,6 +756,7 @@ void CreateControls() {
 
     // Cartão "Imagem"
     const CardDef &c2 = kCards[1];
+    g_addingCard = 1;
     HWND rotation = AddCombo(L"Rotação", x, c2.y + 44, w, IDC_ROTATION);
     AddControl(WC_STATICW, L"Zoom", 0, x, c2.y + 98, w / 2, 18, IDC_LABEL);
     AddControl(WC_STATICW, L"", SS_RIGHT, x + w / 2, c2.y + 98, w - w / 2, 18,
@@ -636,6 +771,7 @@ void CreateControls() {
 
     // Cartão "Aplicativo"
     const CardDef &c3 = kCards[2];
+    g_addingCard = 2;
     AddControl(WC_MOBLENS_TOGGLE, L"Iniciar com o Windows", WS_TABSTOP, x,
                c3.y + 40, w, 28, IDC_AUTOSTART);
     HWND closeAction = AddCombo(L"Ao fechar a janela", x, c3.y + 74, w,
@@ -643,6 +779,13 @@ void CreateControls() {
     AddControl(WC_BUTTONW, L"Desinstalar webcam virtual",
                BS_OWNERDRAW | WS_TABSTOP, x, c3.y + 130, w, 32,
                IDC_UNINSTALL);
+
+    // Botão de menu (modo compacto): as opções viram um menu
+    g_menuButton = CreateWindowExW(0, WC_BUTTONW, L"Opções",
+                                   WS_CHILD | BS_OWNERDRAW | WS_TABSTOP, 0, 0,
+                                   S(kMenuBtnW), S(30), g_main,
+                                   (HMENU) (UINT_PTR) IDC_MENU, g_instance,
+                                   nullptr);
 
     // Valores iniciais
     for (size_t i = 0; i < ARRAYSIZE(kBitRateNames); ++i) {
@@ -732,10 +875,6 @@ void PaintMain(HDC dc) {
     GetTextExtentPoint32W(dc, L"MobLens", 7, &titleSize);
     SelectObject(dc, g_font);
     SetTextColor(dc, g_theme.subtext);
-    RECT sub = {title.left + titleSize.cx + S(12), title.top + S(4),
-                S(kMargin + PREVIEW_WIDTH), title.bottom};
-    DrawTextW(dc, L"Câmera do celular como webcam", -1, &sub,
-              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // Indicador de status (pílula à direita do cabeçalho)
     StreamStatus status = CurrentStatus();
@@ -745,8 +884,18 @@ void PaintMain(HDC dc) {
     GetTextExtentPoint32W(dc, label, lstrlenW(label), &ls);
     const int pillH = S(30);
     const int pillW = ls.cx + S(40);
-    RECT pill = {S(kMargin + PREVIEW_WIDTH) - pillW, S(17),
-                 S(kMargin + PREVIEW_WIDTH), S(17) + pillH};
+    RECT pill = {S(g_headerRight) - pillW, S(17), S(g_headerRight),
+                 S(17) + pillH};
+
+    SelectObject(dc, g_font);
+    SetTextColor(dc, g_theme.subtext);
+    RECT sub = {title.left + titleSize.cx + S(12), title.top + S(4),
+                pill.left - S(8), title.bottom};
+    if (sub.right - sub.left > S(60)) {
+        DrawTextW(dc, L"Câmera do celular como webcam", -1, &sub,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    SelectObject(dc, g_fontBold);
     DrawRoundRect(dc, pill, pillH, g_theme.card, g_theme.cardBorder);
     const COLORREF dotColor = StatusColor(status.state);
     const int dot = S(10);
@@ -758,7 +907,11 @@ void PaintMain(HDC dc) {
     DrawTextW(dc, label, -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // Cartões
-    for (const CardDef &card : kCards) {
+    for (int i = 0; i < 4; ++i) {
+        const CardDef &card = kCards[i];
+        if (i < 3 ? g_compact : !g_statusVisible) {
+            continue;
+        }
         RECT rc = ScaledRect(card.x, card.y, card.w, card.h);
         DrawRoundRect(dc, rc, S(16), g_theme.card, g_theme.cardBorder);
         SelectObject(dc, g_fontBold);
@@ -771,6 +924,10 @@ void PaintMain(HDC dc) {
 
     // Cartão de status e ajuda (abaixo da prévia)
     const CardDef &help = kCards[3];
+    if (!g_statusVisible) {
+        SelectObject(dc, oldFont);
+        return;
+    }
     SelectObject(dc, g_font);
     SetTextColor(dc, g_theme.text);
     RECT st = ScaledRect(help.x + kPad, help.y + 40, help.w - 2 * kPad, 20);
@@ -788,6 +945,9 @@ void PaintMain(HDC dc) {
     };
     int ty = help.y + 72;
     for (const wchar_t *tip : tips) {
+        if (ty + 20 > help.y + help.h - 8) {
+            break;
+        }
         RECT tr = ScaledRect(help.x + kPad, ty, help.w - 2 * kPad, 20);
         DrawTextW(dc, tip, -1, &tr,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -813,6 +973,208 @@ void DrawUninstallButton(const DRAWITEMSTRUCT *di) {
     GetWindowTextW(di->hwndItem, text, 64);
     DrawTextW(dc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SelectObject(dc, old);
+}
+
+void DrawMenuButton(const DRAWITEMSTRUCT *di) {
+    HDC dc = di->hDC;
+    RECT rc = di->rcItem;
+    FillRect(dc, &rc, g_theme.bgBrush);
+    const bool pressed = di->itemState & ODS_SELECTED;
+    DrawRoundRect(dc, rc, S(8), pressed ? g_theme.cardBorder : g_theme.card,
+                  (di->itemState & ODS_FOCUS) ? g_theme.accent
+                                              : g_theme.cardBorder);
+    // Ícone "hambúrguer" (três linhas)
+    HBRUSH brush = CreateSolidBrush(g_theme.text);
+    const int lw = S(16);
+    const int lh = S(2) > 1 ? S(2) : 1;
+    const int cx = (rc.left + rc.right) / 2;
+    const int cy = (rc.top + rc.bottom) / 2;
+    for (int i = -1; i <= 1; ++i) {
+        const int top = cy + i * S(5) - lh / 2;
+        RECT line = {cx - lw / 2, top, cx + lw / 2, top + lh};
+        FillRect(dc, &line, brush);
+    }
+    DeleteObject(brush);
+}
+
+void AppendTrayOptions(HMENU menu);
+
+// Menu com as opções da janela (modo compacto)
+void ShowOptionsMenu() {
+    HMENU menu = CreatePopupMenu();
+    AppendTrayOptions(menu);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, IDC_UNINSTALL,
+                L"Desinstalar webcam virtual...");
+    RECT rc;
+    GetWindowRect(g_menuButton, &rc);
+    TrackPopupMenu(menu, TPM_RIGHTALIGN | TPM_TOPALIGN, rc.right, rc.bottom,
+                   0, g_main, nullptr);
+    DestroyMenu(menu);
+}
+
+// Reorganiza a janela conforme o tamanho, em etapas:
+//   1. prévia + cartões em colunas à direita (1 a 3 colunas);
+//   2. cartões em grade embaixo da prévia;
+//   3. compacto: só a prévia, e as opções viram o menu ☰.
+// O cartão de status some quando não cabe.
+void Layout() {
+    if (!g_preview) {
+        return;
+    }
+    RECT client;
+    GetClientRect(g_main, &client);
+    const int cw = (int) (client.right / g_scale);
+    const int ch = (int) (client.bottom / g_scale);
+    if (cw <= 0 || ch <= 0) {
+        return;  // minimizada
+    }
+
+    // Altura dos cartões de opções (Câmera, Imagem, Aplicativo)
+    const int cardH[3] = {kCards[0].h, kCards[1].h, kCards[2].h};
+    const int gap = 12;
+
+    // Prévia 16:9 dentro de leftW x avail (avail = altura abaixo do
+    // cabeçalho); com espaço, o cartão de status fica embaixo dela
+    struct Plan {
+        bool ok = false;
+        bool compact = false;
+        bool status = false;
+        int cardX[3] = {}, cardY[3] = {};
+        int leftW = 0, previewW = 0, previewH = 0, headerRight = 0;
+    };
+    auto fitPreview = [&](Plan &p, int leftW, int avail, bool allowStatus) {
+        p.leftW = leftW;
+        p.status = allowStatus && avail >= kMinPreviewH + 16 + kStatusH;
+        const int maxH = p.status ? avail - 16 - kStatusH : avail;
+        p.previewW = leftW;
+        p.previewH = leftW * 9 / 16;
+        if (p.previewH > maxH) {
+            p.previewH = maxH > 40 ? maxH : 40;
+            p.previewW = (std::min)(leftW, p.previewH * 16 / 9);
+        }
+    };
+    auto area = [](const Plan &p) {
+        return p.ok ? (long) p.previewW * p.previewH : -1L;
+    };
+
+    // 1) Cartões em colunas à direita (1 a 3 colunas, conforme a altura)
+    Plan side;
+    {
+        int col = 0;
+        int y = 16;
+        bool fits = true;
+        for (int i = 0; i < 3; ++i) {
+            if (y > 16 && y + cardH[i] > ch - kMargin) {
+                ++col;
+                y = 16;
+            }
+            if (y + cardH[i] > ch - kMargin) {
+                fits = false;
+            }
+            side.cardX[i] = col;  // coluna; convertida em x abaixo
+            side.cardY[i] = y;
+            y += cardH[i] + gap;
+        }
+        const int cols = col + 1;
+        const int sideW = cols * kRightW + (cols - 1) * 16;
+        const int leftW = cw - 3 * kMargin - sideW;
+        if (fits && leftW >= 300) {
+            side.ok = true;
+            const int x0 = cw - kMargin - sideW;
+            for (int i = 0; i < 3; ++i) {
+                side.cardX[i] = x0 + side.cardX[i] * (kRightW + 16);
+            }
+            fitPreview(side, leftW, ch - kPreviewY - kMargin, true);
+            side.headerRight = kMargin + leftW;
+        }
+    }
+
+    // 2) Cartões em grade embaixo da prévia
+    Plan bottom;
+    {
+        int cols = (cw - 2 * kMargin + 16) / (kRightW + 16);
+        cols = (std::max)(1, (std::min)(3, cols));
+        int gridH = 0;
+        int rowY = 0;
+        for (int first = 0; first < 3; first += cols) {
+            int rowH = 0;
+            for (int i = first; i < 3 && i < first + cols; ++i) {
+                bottom.cardX[i] = kMargin + (i - first) * (kRightW + 16);
+                bottom.cardY[i] = rowY;  // relativo; ajustado abaixo
+                rowH = (std::max)(rowH, cardH[i]);
+            }
+            rowY += rowH + gap;
+            gridH = rowY - gap;
+        }
+        const int avail = ch - kPreviewY - 16 - gridH - kMargin;
+        if (cw - 2 * kMargin >= kRightW && avail >= kMinPreviewH) {
+            bottom.ok = true;
+            fitPreview(bottom, cw - 2 * kMargin, avail, false);
+            const int gridY = kPreviewY + bottom.previewH + 16;
+            for (int i = 0; i < 3; ++i) {
+                bottom.cardY[i] += gridY;
+            }
+            bottom.headerRight = cw - kMargin;
+        }
+    }
+
+    // 3) Compacto: só a prévia; as opções viram o menu ☰
+    Plan compact;
+    compact.ok = true;
+    compact.compact = true;
+    fitPreview(compact, cw - 2 * kMargin, ch - kPreviewY - kMargin, true);
+    compact.headerRight = cw - kMargin - kMenuBtnW - 8;
+
+    // Prefere manter os cartões visíveis; entre os dois arranjos, o que
+    // deixa a prévia maior
+    const Plan &plan = area(side) >= area(bottom)
+                           ? (side.ok ? side : compact)
+                           : bottom;
+
+    g_compact = plan.compact;
+    g_statusVisible = plan.status;
+    g_headerRight = plan.headerRight;
+    for (int i = 0; i < 3; ++i) {
+        kCards[i].x = plan.cardX[i];
+        kCards[i].y = plan.cardY[i];
+    }
+    const int previewW = plan.previewW;
+    const int previewH = plan.previewH;
+    const int previewX = kMargin + (plan.leftW - previewW) / 2;
+
+    CardDef &status = kCards[3];
+    status.x = kMargin;
+    status.w = plan.leftW;
+    status.y = kPreviewY + previewH + 16;
+    status.h = ch - kMargin - status.y;
+
+    MoveWindow(g_preview, S(previewX), S(kPreviewY), S(previewW),
+               S(previewH), TRUE);
+    SetWindowRgn(g_preview,
+                 CreateRoundRectRgn(0, 0, S(previewW) + 1, S(previewH) + 1,
+                                    S(14), S(14)),
+                 TRUE);
+
+    const UINT show = g_compact ? SWP_HIDEWINDOW : SWP_SHOWWINDOW;
+    HDWP dwp = BeginDeferWindowPos((int) g_placed.size() + 1);
+    for (const PlacedControl &pc : g_placed) {
+        const CardDef &card = kCards[pc.card];
+        dwp = DeferWindowPos(dwp, pc.hwnd, nullptr, S(card.x + pc.dx),
+                             S(card.y + pc.dy), 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+                             | SWP_NOCOPYBITS | show);
+    }
+    dwp = DeferWindowPos(dwp, g_menuButton, nullptr,
+                         S(cw - kMargin - kMenuBtnW), S(17), S(kMenuBtnW),
+                         S(30),
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS
+                         | (g_compact ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+    EndDeferWindowPos(dwp);
+    // Sem isso, rótulos e interruptores movidos ficam com a imagem antiga
+    // (retângulos pretos): redesenha a janela e todos os controles
+    RedrawWindow(g_main, nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
 }
 
 // Reaplica cores após mudança de tema do Windows
@@ -849,10 +1211,12 @@ void HideMainWindow() {
 const UINT kTrayComboBase = 1000;  // + combo * 100 + item
 const UINT kTrayZoomBase = 1900;   // + índice do zoom
 const UINT kTrayToggleBase = 1950; // + índice do interruptor
-const UINT kTrayCombos[] = {IDC_CAMERA, IDC_RESOLUTION, IDC_FPS, IDC_QUALITY,
-                            IDC_ROTATION, IDC_CLOSE_ACTION};
+const UINT kTrayCombos[] = {IDC_CAMERA,  IDC_LENS,     IDC_RESOLUTION,
+                            IDC_FPS,     IDC_QUALITY,  IDC_ROTATION,
+                            IDC_CLOSE_ACTION};
+const size_t kTrayCloseCombo = 6;
 const wchar_t *const kTrayComboNames[] = {
-    L"Câmera", L"Resolução", L"Taxa de quadros", L"Qualidade do vídeo",
+    L"Câmera", L"Lente", L"Resolução", L"Taxa de quadros", L"Qualidade do vídeo",
     L"Rotação", L"Ao fechar a janela"};
 const UINT kTrayZooms[] = {10, 15, 20, 30, 40, 60, 80};
 const UINT kTrayToggles[] = {IDC_MIRROR, IDC_TORCH, IDC_AUTOSTART};
@@ -879,7 +1243,7 @@ HMENU TrayComboMenu(size_t combo) {
 }
 
 void AppendTrayOptions(HMENU menu) {
-    for (size_t i = 0; i < 5; ++i) {  // câmera e imagem
+    for (size_t i = 0; i < kTrayCloseCombo; ++i) {  // câmera e imagem
         AppendMenuW(menu, MF_POPUP, (UINT_PTR) TrayComboMenu(i),
                     kTrayComboNames[i]);
     }
@@ -904,15 +1268,15 @@ void AppendTrayOptions(HMENU menu) {
     AppendMenuW(menu, MF_STRING | (ToggleGet(Ctl(IDC_AUTOSTART)) ? MF_CHECKED
                                                                  : 0),
                 kTrayToggleBase + 2, kTrayToggleNames[2]);
-    AppendMenuW(menu, MF_POPUP, (UINT_PTR) TrayComboMenu(5),
-                kTrayComboNames[5]);
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR) TrayComboMenu(kTrayCloseCombo),
+                kTrayComboNames[kTrayCloseCombo]);
 }
 
 void OnCommand(UINT id, UINT code);
 
 // Retorna true se o comando era uma opção do menu da bandeja
 bool HandleTrayOption(UINT id) {
-    if (id >= kTrayComboBase && id < kTrayComboBase + 600) {
+    if (id >= kTrayComboBase && id < kTrayComboBase + 700) {
         UINT combo = (id - kTrayComboBase) / 100;
         SendMessageW(Ctl(kTrayCombos[combo]), CB_SETCURSEL,
                      (id - kTrayComboBase) % 100, 0);
@@ -977,6 +1341,14 @@ void OnCommand(UINT id, UINT code) {
     switch (id) {
         case IDC_CAMERA:
             if (code == CBN_SELCHANGE) {
+                g_settings.cameraId.clear();  // tipo novo: lente principal
+                FillLenses();
+                FillResolutionAndFps();
+                ApplyFromUi();
+            }
+            break;
+        case IDC_LENS:
+            if (code == CBN_SELCHANGE) {
                 FillResolutionAndFps();
                 ApplyFromUi();
             }
@@ -1004,6 +1376,9 @@ void OnCommand(UINT id, UINT code) {
             break;
         case IDC_UNINSTALL:
             Uninstall();
+            break;
+        case IDC_MENU:
+            ShowOptionsMenu();
             break;
         case ID_TRAY_OPEN:
             ShowMainWindow();
@@ -1108,6 +1483,10 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 DrawUninstallButton((const DRAWITEMSTRUCT *) lp);
                 return TRUE;
             }
+            if (wp == IDC_MENU) {
+                DrawMenuButton((const DRAWITEMSTRUCT *) lp);
+                return TRUE;
+            }
             break;
         case WM_SETTINGCHANGE:
             if (lp && !lstrcmpW((const wchar_t *) lp, L"ImmersiveColorSet")) {
@@ -1115,8 +1494,18 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             break;
         case WM_SIZE:
+            Layout();
             UpdatePreviewEnabled();
             break;
+        case WM_GETMINMAXINFO: {
+            RECT rc = {0, 0, S(kMinClientW), S(kMinClientH)};
+            AdjustWindowRect(&rc, (DWORD) GetWindowLongW(hwnd, GWL_STYLE),
+                             FALSE);
+            auto *mmi = (MINMAXINFO *) lp;
+            mmi->ptMinTrackSize.x = rc.right - rc.left;
+            mmi->ptMinTrackSize.y = rc.bottom - rc.top;
+            return 0;
+        }
         case WM_CLOSE:
             if (g_closeAction == 0) {
                 HideMainWindow();
@@ -1245,8 +1634,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
     wc.lpszClassName = kMainClass;
     RegisterClassW(&wc);
 
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU
-                      | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    const DWORD style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
     RECT rc = {0, 0, S(kClientW), S(kClientH)};
     AdjustWindowRect(&rc, style, FALSE);
     g_main = CreateWindowW(kMainClass, kAppName, style, CW_USEDEFAULT,
@@ -1285,6 +1673,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
     g_streamer = &streamer;
 
     CreateControls();
+    Layout();
     streamer.SetSettings(g_settings);
 
     g_nid.cbSize = sizeof(g_nid);

@@ -87,7 +87,14 @@ struct CameraInfo {
     std::vector<CameraSize> sizes;
     std::vector<UINT32> fps;
     std::vector<HighSpeedMode> highSpeed;
+    // Óptica (de "dumpsys media.camera"); 0 = desconhecido
+    float focalLength = 0;        // mm
+    float sensorDiagonal = 0;     // mm
 };
+
+// Completa focalLength/sensorDiagonal com a saída de "dumpsys media.camera"
+void ParseCameraOptics(const std::string &dump,
+                       std::vector<CameraInfo> &cameras);
 
 // Interpreta a saída de "list_camera_sizes=true" do scrcpy-server
 std::vector<CameraInfo> ParseCameraList(const std::string &output);
@@ -177,6 +184,29 @@ struct StreamStatus {
     std::wstring detail;
 };
 
+// Desenha o vídeo "celular não conectado" (logo + mensagem animada) em NV12
+class IdleFrameRenderer {
+public:
+    ~IdleFrameRenderer();
+    // busy = anima reticências na mensagem; seconds = tempo da animação
+    void Render(uint8_t *nv12, uint32_t width, uint32_t height,
+                const std::wstring &message, const std::wstring &hint,
+                bool busy, double seconds);
+
+private:
+    bool Prepare(uint32_t width, uint32_t height);
+    void Release();
+
+    HDC m_dc = nullptr;
+    HBITMAP m_bitmap = nullptr;
+    void *m_bits = nullptr;
+    uint32_t m_width = 0;
+    uint32_t m_height = 0;
+    HICON m_icon = nullptr;
+    int m_logoSize = 0;
+    HFONT m_fonts[3] = {};
+};
+
 class Streamer {
 public:
     struct Callbacks {
@@ -240,4 +270,13 @@ private:
     HANDLE m_serverProcess = nullptr;
     struct moblens_producer *m_producer = nullptr;
     std::wstring m_preparedSerial;
+
+    // Vídeo "celular não conectado" enviado à webcam (thread própria)
+    void IdleLoop();
+    std::thread m_idleThread;
+    std::atomic<int> m_state{(int) StreamState::NoDevice};
+    std::mutex m_detailMutex;
+    std::wstring m_detail;
+    std::atomic<bool> m_realFrames{false};  // a webcam já recebeu vídeo real
+    std::mutex m_shmWriteMutex;             // um escritor por vez na shm
 };

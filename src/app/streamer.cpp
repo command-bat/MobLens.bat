@@ -185,6 +185,61 @@ std::vector<CameraInfo> ParseCameraList(const std::string &output) {
     return cameras;
 }
 
+// Seções "== Camera HAL device .../<id> (v3.5) static information: =="
+// contêm "android.lens.info.availableFocalLengths" e
+// "android.sensor.info.physicalSize", com os valores na linha seguinte
+void ParseCameraOptics(const std::string &dump,
+                       std::vector<CameraInfo> &cameras) {
+    std::istringstream lines(dump);
+    std::string line;
+    CameraInfo *current = nullptr;
+    while (std::getline(lines, line)) {
+        if (line.find("static information") != std::string::npos
+                && line.find("==") != std::string::npos) {
+            current = nullptr;
+            size_t paren = line.find(" (");
+            size_t slash = line.rfind('/', paren);
+            if (paren == std::string::npos || slash == std::string::npos) {
+                continue;
+            }
+            std::wstring id = Widen(line.substr(slash + 1,
+                                                paren - slash - 1));
+            for (auto &cam : cameras) {
+                if (cam.id == id) {
+                    current = &cam;
+                }
+            }
+            continue;
+        }
+        if (!current) {
+            continue;
+        }
+        const bool focal =
+            line.find("lens.info.availableFocalLengths (") != std::string::npos;
+        const bool sensor =
+            line.find("sensor.info.physicalSize (") != std::string::npos;
+        if (!focal && !sensor) {
+            continue;
+        }
+        std::string values;
+        if (!std::getline(lines, values)) {
+            break;
+        }
+        float a = 0;
+        float b = 0;
+        size_t open = values.find('[');
+        if (open == std::string::npos) {
+            continue;
+        }
+        const char *p = values.c_str() + open + 1;
+        if (focal && sscanf(p, "%f", &a) == 1) {
+            current->focalLength = a;
+        } else if (sensor && sscanf(p, "%f %f", &a, &b) == 2) {
+            current->sensorDiagonal = sqrtf(a * a + b * b);
+        }
+    }
+}
+
 Streamer::Streamer(Callbacks cbs)
         : m_cbs(std::move(cbs)), m_adb(AppDir() + L"\\adb.exe"),
           m_serverPath(AppDir() + L"\\scrcpy-server") {
@@ -209,6 +264,73 @@ void Streamer::Start() {
     }
     ResetEvent(m_stopEvent);
     m_thread = std::thread(&Streamer::Run, this);
+    m_idleThread = std::thread(&Streamer::IdleLoop, this);
+}
+
+// Enquanto algum aplicativo usa a webcam e o celular não está transmitindo,
+// envia um vídeo com o logo do MobLens e o que falta fazer (~15 fps).
+// Durante um reinício da câmera (troca de resolução, lente...) a webcam
+// mantém a última imagem real, como antes.
+void Streamer::IdleLoop() {
+    moblens_producer producer;
+    moblens_producer_init(&producer);
+    IdleFrameRenderer renderer;
+    const ULONGLONG start = GetTickCount64();
+
+    while (WaitForSingleObject(m_stopEvent, 66) == WAIT_TIMEOUT) {
+        const auto state = (StreamState) m_state.load();
+        if (state == StreamState::Streaming
+                || (state == StreamState::Starting && m_realFrames)) {
+            continue;
+        }
+        if (!moblens_producer_try_open(&producer)
+                || !moblens_producer_consumer_active(&producer)) {
+            continue;
+        }
+
+        std::wstring detail;
+        {
+            std::lock_guard<std::mutex> lock(m_detailMutex);
+            detail = m_detail;
+        }
+        std::wstring message;
+        std::wstring hint;
+        bool busy = false;
+        switch (state) {
+            case StreamState::NoDevice:
+                message = L"Celular não conectado";
+                hint = L"Conecte o celular pelo cabo USB, com a depuração "
+                       L"USB ativada";
+                break;
+            case StreamState::Unauthorized:
+                message = L"Autorize este computador no celular";
+                hint = L"Toque em \"Permitir\" no aviso de depuração USB";
+                break;
+            case StreamState::Error:
+                message = L"Não foi possível ligar a câmera do celular";
+                hint = detail;
+                break;
+            default:  // pronto / iniciando
+                message = L"Ligando a câmera do celular";
+                busy = true;
+                break;
+        }
+
+        uint32_t w;
+        uint32_t h;
+        moblens_producer_requested_size(&producer, &w, &h);
+        const double seconds = (GetTickCount64() - start) / 1000.0;
+        std::lock_guard<std::mutex> lock(m_shmWriteMutex);
+        // Confere de novo: o vídeo real pode ter começado agora
+        const auto now = (StreamState) m_state.load();
+        if (now == StreamState::Streaming || m_realFrames) {
+            continue;
+        }
+        uint8_t *dst = moblens_producer_begin(&producer);
+        renderer.Render(dst, w, h, message, hint, busy, seconds);
+        moblens_producer_end(&producer, w, h);
+    }
+    moblens_producer_close(&producer);
 }
 
 void Streamer::Stop() {
@@ -224,6 +346,9 @@ void Streamer::Stop() {
     }
     if (m_thread.joinable()) {
         m_thread.join();
+    }
+    if (m_idleThread.joinable()) {
+        m_idleThread.join();
     }
 }
 
@@ -318,6 +443,14 @@ void Streamer::SetStatus(StreamState state, const std::wstring &detail) {
     static const wchar_t *const names[] = {L"sem celular", L"não autorizado",
         L"pronto", L"iniciando", L"transmitindo", L"erro"};
     Log(L"estado: %ls %ls", names[(int) state], detail.c_str());
+    {
+        std::lock_guard<std::mutex> lock(m_detailMutex);
+        m_detail = detail;
+    }
+    if (state != StreamState::Starting && state != StreamState::Streaming) {
+        m_realFrames = false;  // sem vídeo do celular: volta o vídeo de espera
+    }
+    m_state = (int) state;
     StreamStatus status;
     status.state = state;
     status.detail = detail;
@@ -387,6 +520,13 @@ bool Streamer::PrepareDevice(const std::wstring &serial) {
                   + L" log_level=info list_camera_sizes=true",
               &output, 20000);
     std::vector<CameraInfo> cameras = ParseCameraList(output);
+    // Distância focal / sensor para nomear as lentes (opcional)
+    std::string dump;
+    if (!cameras.empty()
+            && m_adb.Run(s + L"shell dumpsys media.camera", &dump, 15000)
+                   == 0) {
+        ParseCameraOptics(dump, cameras);
+    }
     if (m_cbs.cameras) {
         m_cbs.cameras(cameras);
     }
@@ -595,9 +735,11 @@ void Streamer::RunSession(const std::wstring &serial) {
                         uint32_t w;
                         uint32_t h;
                         moblens_producer_requested_size(m_producer, &w, &h);
+                        std::lock_guard<std::mutex> lock(m_shmWriteMutex);
                         uint8_t *dst = moblens_producer_begin(m_producer);
                         ScaleNv12(frame, dst, w, h, mirror, xmap);
                         moblens_producer_end(m_producer, w, h);
+                        m_realFrames = true;
                     } else {
                         moblens_producer_heartbeat(m_producer);
                     }
